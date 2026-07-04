@@ -5,7 +5,7 @@ A simple Windows tray app built with Tauri, React, TypeScript, and Rust. It poll
 ## Features
 
 - GitHub token input with connection testing
-- Polling interval options: 60, 120, 300 seconds
+- Polling interval options: 15, 30, 60, 120, 300 seconds
 - Background polling and manual "Check now"
 - Native Windows notifications for completed workflow runs
 - Tray menu with open, check now, pause/resume, and quit
