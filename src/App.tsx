@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchAuthenticatedUser, fetchRepositoriesWithActions } from './githubApi';
+import type { GitHubConfig } from './githubApi';
+import { DEFAULT_GITHUB_SERVER_URL, deriveEndpoints, normalizeServerUrl } from './githubUrls';
 import { ensureNotificationPermission, openUrl, sendNotification } from './notification';
-import { loadSettings, loadSeenState, saveSettings } from './storage';
+import { loadSettings, loadSeenState, saveSeenState, saveSettings } from './storage';
 import { Poller } from './poller';
 import './App.css';
 
@@ -26,6 +28,7 @@ export type WorkflowRun = {
 
 export type AppSettings = {
   token: string;
+  serverUrl: string;
   pollingIntervalSeconds: number;
   followedRepositories: Record<string, boolean>;
 };
@@ -41,6 +44,7 @@ type Tab = 'dashboard' | 'repositories' | 'settings';
 
 const defaultSettings: AppSettings = {
   token: '',
+  serverUrl: DEFAULT_GITHUB_SERVER_URL,
   pollingIntervalSeconds: 60,
   followedRepositories: {},
 };
@@ -51,7 +55,6 @@ const defaultSeenState: SeenState = {
 };
 
 const reconnectIntervalMs = 5 * 60 * 1000;
-const githubTokenSettingsUrl = 'https://github.com/settings/personal-access-tokens/new';
 
 const getInitialTheme = (): Theme => {
   const savedTheme = window.localStorage.getItem('buildify-theme');
@@ -118,6 +121,7 @@ function App() {
   const [latestRuns, setLatestRuns] = useState<WorkflowRun[]>([]);
   const isCheckingRef = useRef(false);
   const isReconnectingRef = useRef(false);
+  const persistedServerUrlRef = useRef(DEFAULT_GITHUB_SERVER_URL);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -146,15 +150,15 @@ function App() {
     });
   }, [logEvent]);
 
-  const loadRepositoriesForToken = useCallback(async (token: string, shouldLog = false) => {
-    if (!token) {
+  const loadRepositoriesForToken = useCallback(async (config: GitHubConfig, shouldLog = false) => {
+    if (!config.token) {
       setRepositories([]);
       return;
     }
 
     setIsLoadingRepositories(true);
     try {
-      const fetchedRepositories = await fetchRepositoriesWithActions(token);
+      const fetchedRepositories = await fetchRepositoriesWithActions(config);
       setRepositories(fetchedRepositories);
       if (shouldLog) {
         logEvent(`Loaded ${fetchedRepositories.length} Actions-enabled repositories.`);
@@ -173,17 +177,20 @@ function App() {
     const init = async () => {
       const loadedSettings = await loadSettings();
       const loadedSeenState = await loadSeenState();
-      setSettings({ ...defaultSettings, ...loadedSettings });
+      const merged: AppSettings = { ...defaultSettings, ...loadedSettings };
+      setSettings(merged);
+      persistedServerUrlRef.current = normalizeServerUrl(merged.serverUrl);
       const mergedSeen = { ...defaultSeenState, ...loadedSeenState };
       updateSeenState(mergedSeen);
-      if (loadedSettings.token) {
+      if (merged.token) {
+        const config: GitHubConfig = { token: merged.token, serverUrl: merged.serverUrl };
         isReconnectingRef.current = true;
         try {
-          const user = await fetchAuthenticatedUser(loadedSettings.token);
+          const user = await fetchAuthenticatedUser(config);
           setGithubUsername(user?.login ?? '');
           setConnectionStatus(user ? 'Connected' : 'Connection failed');
           if (user) {
-            await loadRepositoriesForToken(loadedSettings.token);
+            await loadRepositoriesForToken(config);
           }
         } finally {
           isReconnectingRef.current = false;
@@ -207,11 +214,13 @@ function App() {
       setConnectionStatus('Testing...');
     }
 
+    const config: GitHubConfig = { token: settings.token, serverUrl: settings.serverUrl };
+
     try {
-      const user = await fetchAuthenticatedUser(settings.token);
+      const user = await fetchAuthenticatedUser(config);
       setGithubUsername(user?.login ?? '');
       if (user) {
-        await loadRepositoriesForToken(settings.token, source === 'manual');
+        await loadRepositoriesForToken(config, source === 'manual');
       } else {
         setRepositories([]);
       }
@@ -231,12 +240,29 @@ function App() {
     } finally {
       isReconnectingRef.current = false;
     }
-  }, [loadRepositoriesForToken, logEvent, settings.token]);
+  }, [loadRepositoriesForToken, logEvent, settings.serverUrl, settings.token]);
 
   const handleSaveSettings = async () => {
     setIsSaving(true);
     try {
-      await saveSettings(settings);
+      const nextServerUrl = normalizeServerUrl(settings.serverUrl);
+      const serverChanged = nextServerUrl !== persistedServerUrlRef.current;
+      let nextSettings: AppSettings = { ...settings, serverUrl: nextServerUrl };
+
+      if (serverChanged) {
+        // Run ids and repository names are only unique within one server.
+        const freshSeenState: SeenState = { seenRunIds: {}, lastSyncedAt: new Date().toISOString() };
+        updateSeenState(freshSeenState);
+        await saveSeenState(freshSeenState);
+        nextSettings = { ...nextSettings, followedRepositories: {} };
+        setGithubUsername('');
+        setRepositories([]);
+        logEvent('GitHub server changed. Cleared seen runs and follow list.');
+      }
+
+      setSettings(nextSettings);
+      await saveSettings(nextSettings);
+      persistedServerUrlRef.current = nextServerUrl;
       await runConnectionCheck('manual', 'Saved');
       logEvent('Settings saved.');
     } catch (error) {
@@ -386,7 +412,9 @@ function App() {
   const recentDisplay = useMemo(() => recentEvents.slice(0, 6), [recentEvents]);
   const seenCount = useMemo(() => Object.keys(seenState.seenRunIds).length, [seenState.seenRunIds]);
   const connectionTone = getConnectionTone(connectionStatus);
-  const githubProfileUrl = githubUsername ? `https://github.com/${githubUsername}` : 'https://github.com';
+  const endpoints = useMemo(() => deriveEndpoints(settings.serverUrl), [settings.serverUrl]);
+  const githubTokenSettingsUrl = `${endpoints.webBase}/settings/personal-access-tokens/new`;
+  const githubProfileUrl = githubUsername ? `${endpoints.webBase}/${githubUsername}` : endpoints.webBase;
   const followedRepositoryCount = useMemo(
     () => repositories.filter((repo) => settings.followedRepositories[repo.full_name] !== false).length,
     [repositories, settings.followedRepositories],
@@ -587,7 +615,7 @@ function App() {
               <button
                 type="button"
                 className="secondary-button"
-                onClick={() => void loadRepositoriesForToken(settings.token, true)}
+                onClick={() => void loadRepositoriesForToken({ token: settings.token, serverUrl: settings.serverUrl }, true)}
                 disabled={!settings.token || isLoadingRepositories}
               >
                 {isLoadingRepositories ? 'Refreshing...' : 'Refresh'}
@@ -627,6 +655,17 @@ function App() {
               </div>
               <span className={`status-pill ${connectionTone}`}>{connectionStatus}</span>
             </div>
+
+            <label className="field">
+              <span className="field-label">GitHub server URL</span>
+              <input
+                type="url"
+                value={settings.serverUrl}
+                onChange={(event) => setSettings({ ...settings, serverUrl: event.target.value })}
+                placeholder="https://github.com"
+              />
+              <span className="field-hint">API: {endpoints.apiBase}</span>
+            </label>
 
             <label className="field">
               <span className="field-label">GitHub access token</span>

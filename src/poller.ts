@@ -90,7 +90,7 @@ export class Poller {
 
   public async checkNow(): Promise<PollResult> {
     const repositories = await fetchRepositoriesWithWorkflowRuns(
-      this.settings.token,
+      { token: this.settings.token, serverUrl: this.settings.serverUrl },
       this.settings.followedRepositories,
     );
     const repositoryCount = repositories.length;

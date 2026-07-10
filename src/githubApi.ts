@@ -1,24 +1,30 @@
-import type { AppSettings, Repository, WorkflowRun } from './App';
-
-const githubApiBase = 'https://api.github.com';
+import type { Repository, WorkflowRun } from './App';
+import { deriveEndpoints } from './githubUrls';
 
 const defaultHeaders = (token: string) => ({
   Authorization: `token ${token}`,
   Accept: 'application/vnd.github+json',
 });
 
+export type GitHubConfig = {
+  token: string;
+  serverUrl: string;
+};
+
 export type GitHubUser = {
   login: string;
 };
 
-export async function fetchAuthenticatedUser(token: string): Promise<GitHubUser | null> {
-  if (!token) {
+export async function fetchAuthenticatedUser(config: GitHubConfig): Promise<GitHubUser | null> {
+  if (!config.token) {
     return null;
   }
 
+  const { apiBase } = deriveEndpoints(config.serverUrl);
+
   try {
-    const response = await fetch(`${githubApiBase}/user`, {
-      headers: defaultHeaders(token),
+    const response = await fetch(`${apiBase}/user`, {
+      headers: defaultHeaders(config.token),
     });
 
     if (!response.ok) {
@@ -32,21 +38,18 @@ export async function fetchAuthenticatedUser(token: string): Promise<GitHubUser 
   }
 }
 
-export async function testConnection(token: string): Promise<boolean> {
-  return (await fetchAuthenticatedUser(token)) !== null;
+export async function testConnection(config: GitHubConfig): Promise<boolean> {
+  return (await fetchAuthenticatedUser(config)) !== null;
 }
 
-export async function checkConnection(token: string): Promise<boolean> {
-  return testConnection(token);
-}
-
-export async function fetchRepositories(token: string): Promise<Repository[]> {
+export async function fetchRepositories(config: GitHubConfig): Promise<Repository[]> {
+  const { apiBase } = deriveEndpoints(config.serverUrl);
   const repos: Repository[] = [];
   let page = 1;
 
   while (true) {
-    const response = await fetch(`${githubApiBase}/user/repos?per_page=100&page=${page}`, {
-      headers: defaultHeaders(token),
+    const response = await fetch(`${apiBase}/user/repos?per_page=100&page=${page}`, {
+      headers: defaultHeaders(config.token),
     });
 
     if (!response.ok) {
@@ -69,12 +72,13 @@ export async function fetchRepositories(token: string): Promise<Repository[]> {
   return repos;
 }
 
-export async function fetchRepositoriesWithActions(token: string): Promise<Repository[]> {
-  const repos = await fetchRepositories(token);
+export async function fetchRepositoriesWithActions(config: GitHubConfig): Promise<Repository[]> {
+  const { apiBase } = deriveEndpoints(config.serverUrl);
+  const repos = await fetchRepositories(config);
   const checkedRepos = await Promise.all(repos.map(async (repo) => {
     try {
-      const response = await fetch(`${githubApiBase}/repos/${repo.full_name}/actions/workflows?per_page=1`, {
-        headers: defaultHeaders(token),
+      const response = await fetch(`${apiBase}/repos/${repo.full_name}/actions/workflows?per_page=1`, {
+        headers: defaultHeaders(config.token),
       });
 
       if (!response.ok) {
@@ -102,20 +106,21 @@ function getRunSummary(run: any): string {
 }
 
 export async function fetchRepositoriesWithWorkflowRuns(
-  token: string,
+  config: GitHubConfig,
   followedRepositories: Record<string, boolean> = {},
 ): Promise<{
   repository: Repository;
   workflowRuns: WorkflowRun[];
 }[]> {
-  const repos = (await fetchRepositoriesWithActions(token)).filter(
+  const { apiBase } = deriveEndpoints(config.serverUrl);
+  const repos = (await fetchRepositoriesWithActions(config)).filter(
     (repo) => followedRepositories[repo.full_name] !== false,
   );
 
   return Promise.all(repos.map(async (repo) => {
     try {
-      const response = await fetch(`${githubApiBase}/repos/${repo.full_name}/actions/runs?per_page=20`, {
-        headers: defaultHeaders(token),
+      const response = await fetch(`${apiBase}/repos/${repo.full_name}/actions/runs?per_page=20`, {
+        headers: defaultHeaders(config.token),
       });
       if (!response.ok) {
         return { repository: repo, workflowRuns: [] };
@@ -132,7 +137,7 @@ export async function fetchRepositoriesWithWorkflowRuns(
         conclusion: run.conclusion,
         created_at: run.created_at,
         updated_at: run.updated_at,
-      })).filter((run) => run.status === 'completed' || run.status === 'queued' || run.status === 'in_progress');
+      })).filter((run: WorkflowRun) => run.status === 'completed' || run.status === 'queued' || run.status === 'in_progress');
 
       return { repository: repo, workflowRuns };
     } catch {

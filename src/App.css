@@ -220,6 +220,13 @@
   font-weight: 700;
 }
 
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .token-help {
   margin: 0 0 14px;
   padding: 14px 16px;
